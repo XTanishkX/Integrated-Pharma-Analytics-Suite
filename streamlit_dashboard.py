@@ -3,11 +3,12 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.cluster import KMeans
 import statsmodels.formula.api as smf
 from scipy.optimize import curve_fit
 import os
+import plotly.express as px
 
 # --- 1. DATA LOADING FUNCTION ---
 # We use Streamlit's caching to load data once
@@ -40,7 +41,9 @@ st.set_page_config(layout="wide")
 st.title("Integrated Pharma Analytics Suite")
 st.subheader("Patient Journey, Conjoint & Forecasting")
 st.markdown("""
- **Tech:** Python (Pandas, NumPy, scikit-learn, statsmodels), Streamlit, matplotlib  
+**Role:** Lead data analyst (concept, modelling, insight synthesis) — personal project / portfolio  
+**Duration:** 2 weeks (self-driven)  
+**Tech:** Python (Pandas, NumPy, scikit-learn, statsmodels), Streamlit, matplotlib  
 **Objective:** Demonstrate end-to-end commercial analytics for a hypothetical chronic-disease therapy: identify patient segments, quantify treatment preferences (conjoint), and forecast adoption for a new drug to drive launch strategy.
 """)
 
@@ -78,10 +81,28 @@ with tab1:
     st.header("1. Patient Journey Analysis")
     st.markdown("Calculated time-to-treatment, adherence rates, and outcome rates.")
     
-    # Calculate metrics
-    avg_time_to_tx = patient_df['time_to_treatment_days'].mean()
-    adherence_rate = patient_df['adherence'].mean() * 100
-    outcome_rate = patient_df['outcome'].mean() * 100
+    # --- Interactive Filter ---
+    st.markdown("---")
+    st.subheader("Interactive Filters")
+    all_treatments = patient_df['treatment_type'].unique()
+    selected_treatments = st.multiselect(
+        "Filter by Treatment Type:",
+        options=all_treatments,
+        default=all_treatments
+    )
+    
+    if not selected_treatments:
+        st.warning("Please select at least one treatment type.")
+        filtered_df = patient_df.iloc[0:0] # Empty dataframe
+    else:
+        filtered_df = patient_df[patient_df['treatment_type'].isin(selected_treatments)]
+
+    st.markdown("---")
+    
+    # Calculate metrics based on filtered data
+    avg_time_to_tx = filtered_df['time_to_treatment_days'].mean()
+    adherence_rate = filtered_df['adherence'].mean() * 100
+    outcome_rate = filtered_df['outcome'].mean() * 100
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Avg. Time to Treatment", f"{avg_time_to_tx:.1f} days")
@@ -109,10 +130,14 @@ with tab1:
     
     st.subheader("Time-to-Treatment Distribution")
     fig, ax = plt.subplots()
-    sns.histplot(patient_df['time_to_treatment_days'], kde=True, bins=50, ax=ax)
-    ax.set_title("Distribution of Time from Diagnosis to Treatment")
+    # Plot data from the filtered dataframe
+    if not filtered_df.empty:
+        sns.histplot(filtered_df['time_to_treatment_days'], kde=True, bins=50, ax=ax, stat="density")
+        ax.set_title("Distribution of Time from Diagnosis to Treatment (Filtered)")
+    else:
+        ax.set_title("No data to display. Please select a treatment type.")
     ax.set_xlabel("Days")
-    ax.set_ylabel("Patient Count")
+    ax.set_ylabel("Density")
     st.pyplot(fig)
 
 
@@ -151,7 +176,33 @@ with tab2:
     * **Segment S2** (or equivalent): Tends to be younger, low comorbidity, with fast initiation and high outcomes. **Action:** Likely early adopters; target for launch.
     """)
     
-    st.subheader("Segment Visualization")
+    st.markdown("---")
+    st.subheader("Segment Comparison (Radar Chart)")
+    
+    # Normalize data for radar chart (0-1 scale)
+    radar_features = ['age', 'comorbidity_score', 'time_to_treatment_days', 'adherence', 'outcome']
+    profiles_to_plot = segment_profiles[radar_features]
+    scaler_radar = MinMaxScaler()
+    profiles_normalized = scaler_radar.fit_transform(profiles_to_plot)
+    profiles_normalized_df = pd.DataFrame(profiles_normalized, columns=radar_features, index=profiles_to_plot.index)
+    
+    # Melt for Plotly
+    profiles_radar_df = profiles_normalized_df.reset_index().melt(id_vars='segment', var_name='Metric', value_name='Normalized Value')
+
+    # Create Radar Chart
+    fig_radar = px.line_polar(
+        profiles_radar_df,
+        r='Normalized Value',
+        theta='Metric',
+        color='segment',
+        line_close=True,
+        title="Comparing Segment Profiles (Normalized 0-1)"
+    )
+    st.plotly_chart(fig_radar, use_container_width=True)
+
+
+    st.markdown("---")
+    st.subheader("Segment Visualization (Scatter Plots)")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
     sns.scatterplot(data=patient_df, x='age', y='comorbidity_score', hue='segment', palette='viridis', ax=ax1, alpha=0.7)
@@ -183,7 +234,21 @@ with tab3:
             model = smf.logit(formula, data=conjoint_df).fit()
         
         st.subheader("Model Coefficients (Utilities)")
-        st.text(model.summary())
+        
+        # --- FIX: Parse the cluttered summary table ---
+        st.markdown("The table below shows the 'utility' (coefficient) for each attribute level. A higher, positive number is more preferred by patients.")
+        
+        # Extract the coefficients table (this is the magic)
+        results_summary = model.summary()
+        results_df = pd.read_html(results_summary.tables[1].as_html(), header=0, index_col=0)[0]
+        
+        # Clean up and display
+        results_df = results_df.reset_index().rename(columns={'index': 'Attribute Level'})
+        st.dataframe(results_df.style.format({'coef': '{:.3f}', 'std err': '{:.3f}', 'z': '{:.2f}', 'P>|z|': '{:.3f}'}), use_container_width=True)
+
+        # Use an expander for the full (cluttered) summary if needed
+        with st.expander("Show Full Model Summary (Raw Output)"):
+            st.text(model.summary())
         
         st.subheader("Key Findings")
         st.markdown("""
@@ -194,7 +259,10 @@ with tab3:
         * **Implication:** The high weight on efficacy suggests pricing flexibility is possible if efficacy gains are marketed strongly.
         """)
         
-        # Simple relative importance (range of utilities)
+        # --- IMPROVEMENT: Convert importance table to bar chart ---
+        st.subheader("Attribute Importance (Based on Utility Range)")
+        st.markdown("This chart shows the relative importance of each attribute. A higher bar means it's a more powerful driver of patient choice.")
+        
         params = model.params
         importance = {
             'efficacy': params.filter(like='efficacy').max() - 0,
@@ -203,10 +271,14 @@ with tab3:
             'dosing': params.filter(like='dosing').max() - 0
         }
         importance_df = pd.DataFrame.from_dict(importance, orient='index', columns=['Utility Range'])
-        importance_df['Relative Importance %'] = (importance_df['Utility Range'] / importance_df['Utility Range'].sum()) * 100
+        importance_df['Relative Importance %'] = (importance_df['Utility Range'] / importance_df['Utility Range'].sum())
         
-        st.subheader("Attribute Importance (Based on Utility Range)")
-        st.dataframe(importance_df.sort_values('Relative Importance %', ascending=False).style.format('{:.1f}%'))
+        # Sort for plotting
+        importance_to_plot = importance_df.sort_values('Relative Importance %', ascending=False)
+        
+        # Display as a Bar Chart
+        st.bar_chart(importance_to_plot, y='Relative Importance %')
+
 
     except Exception as e:
         st.error(f"An error occurred during model fitting: {e}")
@@ -242,15 +314,49 @@ with tab4:
         * **Implication:** This informs launch timing, inventory planning, and sales team ramp-up, as adoption is expected to accelerate rapidly around month {t0_fit:.1f}.
         """)
 
+        st.markdown("---")
+        # --- INTERACTIVE IMPROVEMENT: What-if Scenarios ---
+        st.subheader("Interactive Scenario Simulation")
+        st.markdown("Adjust the sliders to see how changing market dynamics (e.g., due to marketing spend or competitive action) could affect the adoption curve.")
+        
+        # Create sliders based on fitted parameters
+        K_sim = st.slider(
+            "Simulated Market Potential (K)", 
+            min_value=int(K_fit * 0.5), 
+            max_value=int(K_fit * 1.5), 
+            value=int(K_fit),
+            step=1000
+        )
+        r_sim = st.slider(
+            "Simulated Adoption Rate (r)", 
+            min_value=r_fit * 0.5, 
+            max_value=r_fit * 1.5, 
+            value=r_fit,
+            format="%.3f"
+        )
+        t0_sim = st.slider(
+            "Simulated Inflection Point (t0)", 
+            min_value=int(t0_fit * 0.5), 
+            max_value=int(t0_fit * 1.5), 
+            value=int(t0_fit),
+            step=1
+        )
+        
+        # Calculate new simulated curve
+        adoption_df['forecast_fit'] = logistic_func(adoption_df['month'], K_fit, r_fit, t0_fit)
+        adoption_df['simulated_fit'] = logistic_func(adoption_df['month'], K_sim, r_sim, t0_sim)
+
         # Plot the results
         st.subheader("Adoption Forecast")
-        adoption_df['forecast_fit'] = logistic_func(adoption_df['month'], K_fit, r_fit, t0_fit)
         
         fig, ax = plt.subplots(figsize=(12, 7))
-        ax.scatter(adoption_df['month'], adoption_df['cumulative_adoption'], label='Simulated Actuals', alpha=0.7)
-        ax.plot(adoption_df['month'], adoption_df['forecast_fit'], label='Fitted Logistic Curve', color='red', linestyle='--')
-        ax.axvline(t0_fit, color='gray', linestyle=':', label=f'Inflection Point (t0={t0_fit:.1f})')
-        ax.axhline(K_fit, color='green', linestyle=':', label=f'Market Potential (K={K_fit:,.0f})')
+        ax.scatter(adoption_df['month'], adoption_df['cumulative_adoption'], label='Simulated Actuals', alpha=0.5, s=20, color='gray')
+        ax.plot(adoption_df['month'], adoption_df['forecast_fit'], label='Original Fitted Curve', color='red', linestyle='--')
+        ax.plot(adoption_df['month'], adoption_df['simulated_fit'], label='Interactive Simulation', color='blue', linestyle='-', linewidth=2)
+        
+        ax.axvline(t0_fit, color='red', linestyle=':', label=f'Original Inflection (t0={t0_fit:.1f})')
+        ax.axvline(t0_sim, color='blue', linestyle=':', label=f'Simulated Inflection (t0={t0_sim:.1f})')
+        
         ax.set_title("Cumulative Adoption Forecast (Logistic Fit)")
         ax.set_xlabel("Month")
         ax.set_ylabel("Cumulative Adopters")
